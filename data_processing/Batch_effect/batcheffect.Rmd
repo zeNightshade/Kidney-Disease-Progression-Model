@@ -1,0 +1,101 @@
+---
+title: "FIRST_5_STEPS"
+author: '520004915'
+date: "2024-04-11"
+output: html_document
+---
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(GEOquery)
+library(limma)
+library(caret)
+library(stringr)
+rm(list=ls())
+
+gse1 ='GSE36059'
+gse2 ='GSE129166'
+
+eSet1 <- getGEO('GSE36059')
+eSet1<- eSet1$GSE36059_series_matrix.txt.gz
+eSet2 <- getGEO('GSE129166')
+eSet2<- eSet2$GSE129166_series_matrix.txt.gz
+
+exp1 <- exprs(eSet1)
+phe1 <- pData(phenoData(eSet1))
+feature1<-fData(eSet1)
+
+exp2 <- exprs(eSet2)
+phe2 <- pData(phenoData(eSet2))
+feature2<-fData(eSet2)
+#clean features
+f1 <-feature1 %>% filter(`Gene Symbol` != '', !is.na(`Gene Symbol`))
+f1$'Gene Symbol' <- sapply(strsplit(f1$'Gene Symbol', ' /// '), function(x) x[1])
+
+f2 <-feature2 %>% filter(`Gene Symbol` != '', !is.na(`Gene Symbol`))
+f2$'Gene Symbol' <- sapply(strsplit(f2$'Gene Symbol', ' /// '), function(x) x[1])
+
+#conbime gene expressions
+table(rownames(exp1) %in% rownames(exp2))
+exp1 <- exp1[intersect(rownames(exp1),rownames(exp2)),]
+exp2 <- exp2[intersect(rownames(exp1),rownames(exp2)),]
+
+if(!identical(rownames(phe1),colnames(exp1))) exp1 = exp1[,match(rownames(phe1),colnames(exp1))]
+if(!identical(rownames(phe2),colnames(exp2))) exp2 = exp2[,match(rownames(phe2),colnames(exp2))]
+
+exp <- cbind(exp1,exp2)
+
+#remove batch effects
+batch_info <- c(rep(1, ncol(exp1)), rep(2, ncol(exp2)))
+exprSet_corrected <- removeBatchEffect(exp, batch_info)
+##set groups
+phe1$outcome <- ifelse(str_detect(phe1$title, 'non-rejecting'), 'non-rejection',
+                       ifelse(str_detect(phe1$title, 'ABMR'), 'ABMR',
+                              ifelse(str_detect(phe1$title, 'TCMR'), 'TCMR', 'Other')))
+phe1 <- phe1%>% filter(outcome != 'Other')#remove other
+
+phe2 <-phe2 %>% mutate(
+  ABMR_Status = ifelse(`abmr (no:ch1` == '0_Yes:1): 1', 'ABMR', 'ABMR Stable'),
+  TCMR_Status = ifelse(`tcmr (no:ch1` == '0_borderline:1_TCMR:2): 1', 'TCMR', 'TCMR Stable')
+  )%>%
+    filter(!(ABMR_Status == 'ABMR' & TCMR_Status == 'TCMR')) %>%
+  mutate(
+    outcome = case_when(
+      ABMR_Status == 'ABMR Stable' & TCMR_Status == 'TCMR Stable' ~ 'non-rejection',
+      ABMR_Status == 'ABMR Stable' ~ 'TCMR',
+      TCMR_Status == 'TCMR Stable' ~ 'ABMR',
+      TRUE ~ NA_character_
+    )
+  )
+###remove both TCMR and ABMR, then if the original sting was TCMR Stable, then it appears to be ABMR
+
+group <- table(c(phe1$outcome, phe2$outcome))
+
+#normalisation
+combine_ID <- union(feature1$ID, feature2$ID)
+eMat <- exprSet_corrected[rownames(exprSet_corrected) %in% combine_ID, ]
+gene_means <- rowMeans(eMat)
+gene_percentile <- rank(gene_means) / length(gene_means)
+threshold <- 0.25
+filtered_genes <- eMat[gene_percentile > threshold,]
+## [normalisation]
+exprSet <- normalizeBetweenArrays(filtered_genes)
+qx <- as.numeric(quantile(exprSet,c(0.,0.25,0.5,0.75,0.99,1.0),na.rm=T))
+logC <- (qx[5]>100) ||
+           (qx[6]-qx[1]>50 && qx[2]>0) ||
+            (qx[2]>0 && qx[2]<1 && qx[4]>1 && qx[4]<2)
+if (logC){
+  exprSet [which(exprSet <=0)] <- NaN
+  exprSet_clean <- log2(exprSet)
+  print('log2 transformation finished')
+}else{
+  print('does not need log2 transformation')
+}
+#normalisaton done, see how it looks
+boxplot(exp)#after combination
+boxplot(exprSet_corrected)#bacth effected
+boxplot(exprSet)#normaled
+
+
+```

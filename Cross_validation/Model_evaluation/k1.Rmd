@@ -1,0 +1,97 @@
+---
+title: "ki"
+author: '520004915'
+date: "2024-03-24"
+output: html_document
+---
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(GEOquery)
+library(limma)
+library(caret)
+gse <- getGEO('GSE21374')# all samples are AR (rejection)
+gse <- gse$GSE21374_series_matrix.txt.gz
+
+feature<-fData(gse)
+feature <-na.omit(feature[feature$'Gene Symbol' != "", ])
+eMat<-exprs(gse)
+phe <- pData(phenoData((gse)))
+
+#Q 1: what is the average days of expression of failure?-->help the medical team preparing the potential failure of transplantation to minimize the cost of treatment of follow-up treatment and the damage of patients' health
+
+phe$biopsy_days_numeric <- as.numeric(phe$'time of biopsy post transplant (days):ch1')
+phe$fail_days_numeric<- as.numeric(phe$'time from biopsy to failure/censoring (days):ch1')
+phe$total_checking_days <- with(phe, biopsy_days_numeric + fail_days_numeric)
+mean_fail_days_from_transplantation <- round(mean(phe$total_checking_days),0)
+
+#Q 2: what are the relative genes to transplantation failure among these samples?
+#step 1: feature selection
+##LIMMA**
+outcome <- ifelse(grepl('nonrej',phe$'rejection/non rejection:ch1'),'Non-Rejection','Rejection')
+gse$outcome <-outcome
+table_outcome <- table(outcome)
+desgin <- model.matrix(~outcome)
+fit <- lmFit(eMat, desgin)
+fit <- eBayes(fit)
+topTable(fit,gene=feature[,'Gene Symbol'])
+
+
+###model 
+##pca
+gse_pca <- prcomp(t(eMat))
+df_toplot <- data.frame(gse$outcome, 
+                        pc1 = gse_pca$x[,1], pc2 = gse_pca$x[,2])
+
+ggplot(df_toplot, aes(x = pc1, y = pc2, color = gse.outcome)) + 
+  geom_point(size = 4) + 
+  theme_minimal() #non-rejection quite clustered
+
+
+largevar = apply(gse, 1, var)
+ind = which(largevar > quantile(largevar, 0.9))
+
+X = as.matrix(t(exprs(gse[ind,])))
+y = gse$outcome
+
+cvK = 5
+cv_50acc5_knn = cv_50acc5_svm = cv_50acc5_rf = c()
+cv_acc_knn = cv_acc_svm = cv_acc_rf = c()
+
+n_sim = 25
+for (i in 1:n_sim) {
+
+  cvSets = cvTools::cvFolds(nrow(X), cvK)
+  cv_acc_knn = cv_acc_svm = cv_acc_rf = c()
+  
+  for (j in 1:cvK) {
+    test_id = cvSets$subsets[cvSets$which == j]
+    X_test = X[test_id, ]
+    X_train = X[-test_id, ]
+    y_test = y[test_id]
+    y_train = y[-test_id]
+    
+    ## KNN
+    fit5 = class::knn(train = X_train, test = X_test, cl = y_train, k = 5)
+    cv_acc_knn[j] = mean(fit5 == y_test)
+    
+    ## SVM
+    svm_res <- e1071::svm(x = X_train, y = as.factor(y_train))
+    fit <- predict(svm_res, X_test)
+    cv_acc_svm[j] = mean(fit == y_test)
+
+    ## RandomForest
+    rf_res <- randomForest::randomForest(x = X_train, y = as.factor(y_train))
+    fit <- predict(rf_res, X_test)
+    cv_acc_rf[j] = mean(fit == y_test)
+  }
+  cv_50acc5_knn <- append(cv_50acc5_knn, mean(cv_acc_knn))
+  cv_50acc5_svm <- append(cv_50acc5_svm, mean(cv_acc_svm))
+  cv_50acc5_rf <- append(cv_50acc5_rf, mean(cv_acc_rf))
+}
+
+
+
+boxplot(list(SVM = cv_50acc5_svm, KNN = cv_50acc5_knn , RF= cv_50acc5_rf ), ylab="CV Accuracy")
+```

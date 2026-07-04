@@ -1,0 +1,244 @@
+---
+title: "FIRST_5_STEPS"
+author: '520004915'
+date: "2024-04-11"
+output: html_document
+---
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(GEOquery)
+library(limma)
+library(caret)
+library(stringr)
+library(ggrepel)
+gse1 ='GSE36059'
+gse2 ='GSE129166'
+eSet1 <- getGEO('GSE36059')
+eSet1<- eSet1$GSE36059_series_matrix.txt.gz
+eSet2 <- getGEO('GSE129166')
+eSet2<- eSet2$GSE129166_series_matrix.txt.gz
+exp1 <- exprs(eSet1)
+phe1 <- pData(phenoData(eSet1))
+feature1<-fData(eSet1)
+exp2 <- exprs(eSet2)
+phe2 <- pData(phenoData(eSet2))
+feature2<-fData(eSet2)
+```
+
+```{r}
+#clean features
+f1 <-feature1 %>% filter(`Gene Symbol` != '', !is.na(`Gene Symbol`))
+f1$'Gene Symbol' <- sapply(strsplit(f1$'Gene Symbol', ' /// '), function(x) x[1])
+f1$'Gene Symbol' <- make.unique(f1$'Gene Symbol', sep = '_')
+f2 <-feature2 %>% filter(`Gene Symbol` != '', !is.na(`Gene Symbol`))
+f2$'Gene Symbol' <- sapply(strsplit(f2$'Gene Symbol', ' /// '), function(x) x[1])
+f2$'Gene Symbol' <- make.unique(f2$'Gene Symbol', sep = '_')
+## Rename probe IDs in expression matrix to gene symbols
+exp1 <- as.data.frame(exp1)
+# Probe ID in column 1, gene symbol in column 11
+gene_symbols1 <- f1[, c(1, 11)]
+exp1[, 'ID'] <- rownames(exp1)
+exp1 <- merge(x = exp1, y = gene_symbols1, by.x = 'ID')
+f1 <- f1 %>% filter(`ID` %in% exp1$`ID`)
+exp1[, 'Gene Symbol'] <- make.unique(exp1[, 'Gene Symbol'], sep = '_')
+# Set gene symbols as the rownames of the data frame
+rownames(exp1) <- exp1[, 'Gene Symbol']
+exp1[, c('ID', 'Gene Symbol')] <- NULL
+exp1 <- as.matrix(exp1)
+exp2 <- as.data.frame(exp2)
+gene_symbols2 <- f2[, c(1, 11)]
+exp2[, 'ID'] <- rownames(exp2)
+exp2 <- merge(x = exp2, y = gene_symbols2, by.x = 'ID')
+f2 <- f2 %>% filter(`ID` %in% exp2$`ID`)
+exp2[, 'Gene Symbol'] <- make.unique(exp2[, 'Gene Symbol'], sep = '_')
+rownames(exp2) <- exp2[, 'Gene Symbol']
+exp2[, c('ID', 'Gene Symbol')] <- NULL
+exp2 <- as.matrix(exp2)
+#conbime gene expressions
+#table(rownames(exp1) %in% rownames(exp2))
+exp1 <- exp1[intersect(rownames(exp1),rownames(exp2)),]
+exp2 <- exp2[intersect(rownames(exp1),rownames(exp2)),]
+if(!identical(rownames(phe1),colnames(exp1))) exp1 = exp1[,match(rownames(phe1),colnames(exp1))]
+if(!identical(rownames(phe2),colnames(exp2))) exp2 = exp2[,match(rownames(phe2),colnames(exp2))]
+exp <- cbind(exp1,exp2)
+#remove batch effects
+batch_info <- c(rep(1, ncol(exp1)), rep(2, ncol(exp2)))
+exprSet_corrected <- removeBatchEffect(exp, batch_info)
+##set groups
+phe1$outcome <- ifelse(str_detect(phe1$title, 'non-rejecting'), 'nonrejection',
+                       ifelse(str_detect(phe1$title, 'ABMR'), 'ABMR',
+                              ifelse(str_detect(phe1$title, 'TCMR'), 'TCMR', 'Other')))
+phe1 <- phe1%>% filter(outcome != 'Other')#remove other
+phe2 <-phe2 %>% mutate(
+  ABMR_Status = ifelse(`abmr (no:ch1` == '0_Yes:1): 1', 'ABMR', 'ABMR Stable'),
+  TCMR_Status = ifelse(`tcmr (no:ch1` == '0_borderline:1_TCMR:2): 1', 'TCMR', 'TCMR Stable')
+  )%>%
+    filter(!(ABMR_Status == 'ABMR' & TCMR_Status == 'TCMR')) %>%
+  mutate(
+    outcome = case_when(
+      ABMR_Status == 'ABMR Stable' & TCMR_Status == 'TCMR Stable' ~ 'nonrejection',
+      ABMR_Status == 'ABMR Stable' ~ 'TCMR',
+      TCMR_Status == 'TCMR Stable' ~ 'ABMR',
+      TRUE ~ NA_character_
+    )
+  )
+###remove both TCMR and ABMR, then if the original sting was TCMR Stable, then it appears to be ABMR
+## Remove corresponding columns of geo accession data from expression matrix that were dropped in pheno data
+exprSet_corrected <- exprSet_corrected[, colnames(exprSet_corrected) %in% c(phe1$geo_accession, phe2$geo_accession)]
+group <- table(c(phe1$outcome, phe2$outcome))
+#normalisation
+combine_symbol <- union(f1$`Gene Symbol`, f2$`Gene Symbol`)
+eMat <- exprSet_corrected[rownames(exprSet_corrected) %in% combine_symbol, ]
+gene_means <- rowMeans(eMat)
+gene_percentile <- rank(gene_means) / length(gene_means)
+threshold <- 0.25
+filtered_genes <- eMat[gene_percentile > threshold,]
+## [normalisation]
+exprSet <- normalizeBetweenArrays(filtered_genes)
+qx <- as.numeric(quantile(exprSet,c(0.,0.25,0.5,0.75,0.99,1.0),na.rm=T))
+logC <- (qx[5]>100) ||
+           (qx[6]-qx[1]>50 && qx[2]>0) ||
+            (qx[2]>0 && qx[2]<1 && qx[4]>1 && qx[4]<2)
+if (logC){
+  exprSet [which(exprSet <=0)] <- NaN
+  exprSet_clean <- log2(exprSet)
+  print('log2 transformation finished')
+}else{
+  print('does not need log2 transformation')
+}
+#normalisaton done
+```
+top genes <limma>
+```{r}
+group_list <- c(phe1$outcome, phe2$outcome)
+group_factor <- factor(group_list, levels = make.names(levels(factor(group_list))))
+design <- model.matrix(~0 + group_factor)
+colnames(design) <- levels(group_factor)
+rownames(design) <- colnames(exprSet)
+cont.wt <- makeContrasts(
+  ABMR_vs_TCMR = ABMR - TCMR,#negative indicates lower expressed in abmr
+  TCMR_vs_nonrejection = TCMR - nonrejection,
+  ABMR_vs_nonrejection = ABMR - nonrejection,
+  levels = design
+)
+fit <- lmFit(exprSet, design)
+fit2 <- contrasts.fit(fit, cont.wt)
+fit2 <- eBayes(fit2)
+tT <- topTable(fit2, adjust ='BH',n=Inf)
+
+top10 <-rownames(tT[order(tT$adj.P.Val),][1:10,])
+top50 <-rownames(tT[order(tT$adj.P.Val),][1:50,])
+top100 <-rownames(tT[order(tT$adj.P.Val),][1:100,])
+
+```
+heatmap for top100 genes
+```{r,message=F}
+library(pheatmap)
+
+top100_expr <- exprSet[rownames(exprSet) %in% top100, ]
+breaks <- seq(min(top100_expr), max(top100_expr), length.out = 100)
+color_palette <- colorRampPalette(c('dodgerblue4', 'white', 'yellow'))(99)
+
+sample_annotation <- data.frame(Group = factor(group_list))
+rownames(sample_annotation) <- colnames(top100_expr)
+
+annotation_colors <- c(ABMR='firebrick4', TCMR='darkseagreen3', nonrejection='white')
+
+annotation_col_colors <- list(Group = annotation_colors)
+
+pheatmap(top100_expr,
+         color = color_palette,
+         breaks = breaks,
+         annotation_col = sample_annotation,
+         annotation_colors = annotation_col_colors,
+         fontsize = 3,
+         fontsize_row = 3,
+         fontsize_col = 3,
+         clustering_method = "complete",
+         scale = "row",
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         legend = TRUE)
+
+```
+top genes (lasso)
+```{r,message=F}
+library(glmnet)
+
+group_numeric <- as.numeric(factor(group_list))
+x <- t(exprSet)
+set.seed(3888)
+cv_lasso <- cv.glmnet(x, group_numeric, alpha = 1)
+opt_lambda <- cv_lasso$lambda.min
+
+final_lasso <- glmnet(x, group_numeric, alpha = 1, lambda = opt_lambda)
+lasso_coef <- coef(final_lasso, s = opt_lambda)
+selected_genes <- rownames(exprSet)[which(lasso_coef[-1,] != 0)]
+
+```
+heatmap for top genes <lasso>
+```{r}
+selected_lasso <- exprSet[rownames(exprSet) %in% selected_genes, ]
+breaks <- seq(min(selected_lasso), max(selected_lasso), length.out = 136)
+color_palette <- colorRampPalette(c('dodgerblue4', 'white', 'yellow'))(135)
+
+sample_annotation <- data.frame(Group = factor(group_list))
+rownames(sample_annotation) <- colnames(selected_lasso)
+
+annotation_colors <- c(ABMR='firebrick4', TCMR='darkseagreen3', nonrejection='white')
+
+annotation_col_colors <- list(Group = annotation_colors)
+
+pheatmap(selected_lasso,
+         color = color_palette,
+         breaks = breaks,
+         annotation_col = sample_annotation,
+         annotation_colors = annotation_col_colors,
+         fontsize = 2,
+         fontsize_row = 3,
+         fontsize_col = 2,
+         clustering_method = "complete",
+         scale = "row",
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         legend = TRUE)
+```
+
+Linear regression
+```{r}
+group_list <- c(phe1$outcome, phe2$outcome)
+exprSet_clean_transposed <- t(exprSet)
+exprSet_clean_transposed_with_group <- cbind(exprSet_clean_transposed, group_list)
+```
+
+```{r}
+exprSet_clean_transposed_with_group <- data.frame(exprSet_clean_transposed_with_group)
+group_factor <- exprSet_clean_transposed_with_group$group_list
+group_dummy <- model.matrix(~ group_factor - 1)
+```
+
+```{r}
+average_coefficients <- numeric(ncol(exprSet_clean_transposed_with_group) - 1)
+
+for (gene_index in 1:(ncol(exprSet_clean_transposed_with_group) - 1)) {
+  gene_coefficients <- numeric(nrow(exprSet_clean_transposed_with_group))
+  gene_expression <- exprSet_clean_transposed_with_group[, gene_index]
+  for (sample_index in 1:nrow(exprSet_clean_transposed_with_group)) {
+    sample_expression <- gene_expression[sample_index]
+    group_factor <- exprSet_clean_transposed_with_group$group_list[sample_index]
+    group_numeric <- as.numeric(factor(group_factor, levels = unique(exprSet_clean_transposed_with_group$group_list)))
+    fit <- lm(sample_expression ~ group_numeric)
+    gene_coefficients[sample_index] <- fit$coefficients['group_numeric']
+  }
+  average_coefficients[gene_index] <- mean(gene_coefficients, na.rm = TRUE)
+}
+gene_coefficients_df <- data.frame(
+  Gene = colnames(exprSet_clean_transposed_with_group)[-ncol(exprSet_clean_transposed_with_group)],
+  AverageCoefficient = average_coefficients
+)
+gene_coefficients_df_sorted <- gene_coefficients_df[order(-gene_coefficients_df$AverageCoefficient), ]
+print(gene_coefficients_df_sorted)
+```
+

@@ -1,0 +1,29 @@
+## heatmap
+```{r}
+library(pheatmap)
+
+top_genes_final_expr <- combat_eMat_70[rownames(combat_eMat_70) %in% top_genes_final,]
+myCol <- colorRampPalette(c("navy", "white", "firebrick3"))(100)
+breaks <- seq(min(top_genes_final_expr), max(top_genes_final_expr), length.out = 100)
+
+sample_annotation <- data.frame(Group = group_factor_final)
+rownames(sample_annotation) <- colnames(top_genes_final_expr)
+
+annotation_colors <- c(ABMR = "red", TCMR = "blue", Stable = "green")
+annotation_col_colors <- list(Group = annotation_colors)
+
+pheatmap(top_genes_final_expr,
+         color = myCol,
+         breaks = breaks,
+         annotation_col = sample_annotation,
+         annotation_colors = annotation_col_colors,
+         fontsize = 3,
+         fontsize_row = 3,
+         fontsize_col = 3,
+         clustering_method = "complete",
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         legend = TRUE,
+         main = "Expression Levels of Top 49 Genes")
+
+```

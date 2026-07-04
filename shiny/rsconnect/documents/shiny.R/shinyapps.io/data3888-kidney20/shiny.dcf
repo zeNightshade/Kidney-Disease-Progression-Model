@@ -1,0 +1,13 @@
+name: shiny
+title: shiny
+username: data3888-kidney20
+account: data3888-kidney20
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 12029721
+bundleId: 8809239
+url: https://data3888-kidney20.shinyapps.io/shiny/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE
+ignoredFiles: test.csv

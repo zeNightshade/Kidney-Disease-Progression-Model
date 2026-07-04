@@ -1,0 +1,313 @@
+---
+title: "FIRST_5_STEPS"
+author: '520004915'
+date: "2024-04-11"
+output: html_document
+---
+```{r setup, include=FALSE}
+library(caret)
+library(cvTools)
+library(dplyr)
+library(e1071)
+library(GEOquery)
+library(ggplot2)
+library(glmnet)
+library(limma)
+library(pheatmap)
+library(randomForest)
+library(stringr)
+library(tidyverse)
+rm(list = ls())
+```
+
+
+Loading in the datasets
+
+```{r}
+gse1 ='GSE36059'
+gse2 ='GSE129166'
+eSet1 <- getGEO('GSE36059')
+eSet1 <- eSet1$GSE36059_series_matrix.txt.gz
+eSet2 <- getGEO('GSE129166')
+eSet2 <- eSet2$GSE129166_series_matrix.txt.gz
+exp1 <- exprs(eSet1)
+phe1 <- pData(phenoData(eSet1))
+feature1 <- fData(eSet1)
+exp2 <- exprs(eSet2)
+phe2 <- pData(phenoData(eSet2))
+feature2 <- fData(eSet2)
+```
+
+
+Cleaning and merging of the datasets
+
+```{r}
+set.seed(3888)
+#clean features
+f1 <-feature1 %>% filter(`Gene Symbol` != '', !is.na(`Gene Symbol`))
+f1$'Gene Symbol' <- sapply(strsplit(f1$'Gene Symbol', ' /// '), function(x) x[1])
+f1$'Gene Symbol' <- make.unique(f1$'Gene Symbol', sep = '_')
+f2 <-feature2 %>% filter(`Gene Symbol` != '', !is.na(`Gene Symbol`))
+f2$'Gene Symbol' <- sapply(strsplit(f2$'Gene Symbol', ' /// '), function(x) x[1])
+f2$'Gene Symbol' <- make.unique(f2$'Gene Symbol', sep = '_')
+## Rename probe IDs in expression matrix to gene symbols
+exp1 <- as.data.frame(exp1)
+# Probe ID in column 1, gene symbol in column 11
+gene_symbols1 <- f1[, c(1, 11)]
+exp1[, 'ID'] <- rownames(exp1)
+exp1 <- merge(x = exp1, y = gene_symbols1, by.x = 'ID')
+f1 <- f1 %>% filter(`ID` %in% exp1$`ID`)
+exp1[, 'Gene Symbol'] <- make.unique(exp1[, 'Gene Symbol'], sep = '_')
+# Set gene symbols as the rownames of the data frame
+rownames(exp1) <- exp1[, 'Gene Symbol']
+exp1[, c('ID', 'Gene Symbol')] <- NULL
+exp1 <- as.matrix(exp1)
+exp2 <- as.data.frame(exp2)
+gene_symbols2 <- f2[, c(1, 11)]
+exp2[, 'ID'] <- rownames(exp2)
+exp2 <- merge(x = exp2, y = gene_symbols2, by.x = 'ID')
+f2 <- f2 %>% filter(`ID` %in% exp2$`ID`)
+exp2[, 'Gene Symbol'] <- make.unique(exp2[, 'Gene Symbol'], sep = '_')
+rownames(exp2) <- exp2[, 'Gene Symbol']
+exp2[, c('ID', 'Gene Symbol')] <- NULL
+exp2 <- as.matrix(exp2)
+#conbime gene expressions
+#table(rownames(exp1) %in% rownames(exp2))
+exp1 <- exp1[intersect(rownames(exp1),rownames(exp2)),]
+exp2 <- exp2[intersect(rownames(exp1),rownames(exp2)),]
+if(!identical(rownames(phe1),colnames(exp1))) exp1 = exp1[,match(rownames(phe1),colnames(exp1))]
+if(!identical(rownames(phe2),colnames(exp2))) exp2 = exp2[,match(rownames(phe2),colnames(exp2))]
+exp <- cbind(exp1,exp2)
+#remove batch effects
+batch_info <- c(rep(1, ncol(exp1)), rep(2, ncol(exp2)))
+exprSet_corrected <- removeBatchEffect(exp, batch_info)
+##set groups
+phe1$outcome <- ifelse(str_detect(phe1$title, 'non-rejecting'), 'non-rejection',
+                       ifelse(str_detect(phe1$title, 'ABMR'), 'ABMR',
+                              ifelse(str_detect(phe1$title, 'TCMR'), 'TCMR', 'Other')))
+phe1 <- phe1%>% filter(outcome != 'Other')#remove other
+phe2 <-phe2 %>% mutate(
+  ABMR_Status = ifelse(`abmr (no:ch1` == '0_Yes:1): 1', 'ABMR', 'ABMR Stable'),
+  TCMR_Status = ifelse(`tcmr (no:ch1` == '0_borderline:1_TCMR:2): 1', 'TCMR', 'TCMR Stable')
+  )%>%
+    filter(!(ABMR_Status == 'ABMR' & TCMR_Status == 'TCMR')) %>%
+  mutate(
+    outcome = case_when(
+      ABMR_Status == 'ABMR Stable' & TCMR_Status == 'TCMR Stable' ~ 'non-rejection',
+      ABMR_Status == 'ABMR Stable' ~ 'TCMR',
+      TCMR_Status == 'TCMR Stable' ~ 'ABMR',
+      TRUE ~ NA_character_
+    )
+  )
+###remove both TCMR and ABMR, then if the original sting was TCMR Stable, then it appears to be ABMR
+## Remove corresponding columns of geo accession data from expression matrix that were dropped in pheno data
+exprSet_corrected <- exprSet_corrected[, colnames(exprSet_corrected) %in% c(phe1$geo_accession, phe2$geo_accession)]
+group <- table(c(phe1$outcome, phe2$outcome))
+#normalisation
+combine_symbol <- union(f1$`Gene Symbol`, f2$`Gene Symbol`)
+eMat <- exprSet_corrected[rownames(exprSet_corrected) %in% combine_symbol, ]
+gene_means <- rowMeans(eMat)
+gene_percentile <- rank(gene_means) / length(gene_means)
+threshold <- 0.25
+filtered_genes <- eMat[gene_percentile > threshold,]
+## [normalisation]
+exprSet <- normalizeBetweenArrays(filtered_genes)
+qx <- as.numeric(quantile(exprSet,c(0.,0.25,0.5,0.75,0.99,1.0),na.rm=T))
+logC <- (qx[5]>100) ||
+           (qx[6]-qx[1]>50 && qx[2]>0) ||
+            (qx[2]>0 && qx[2]<1 && qx[4]>1 && qx[4]<2)
+if (logC){
+  exprSet [which(exprSet <=0)] <- NaN
+  exprSet_clean <- log2(exprSet)
+  print('log2 transformation finished')
+}else{
+  print('does not need log2 transformation')
+}
+#normalisaton done, see how it looks
+boxplot(exp)#after combination
+
+boxplot(exprSet_corrected)#bacth effected
+
+boxplot(exprSet)#normaled
+```
+
+
+Exploring the dataset with PCA
+
+```{r}
+set.seed(3888)
+gse_pca <- prcomp(t(exprSet))
+df_toplot <- data.frame(c(phe1$outcome, phe2$outcome),
+                        pc1 = gse_pca$x[,1], pc2 = gse_pca$x[,2])
+ggplot(df_toplot, aes(x = pc1, y = pc2, color = c(phe1$outcome, phe2$outcome))) + 
+  geom_point(size = 1.5) + labs(colour = "Outcome") +
+  theme_minimal()
+
+
+
+
+
+```
+
+
+Selecting the top differentially expressed genes using Limma
+
+```{r}
+set.seed(3888)
+combined_outcome = c(phe1$outcome, phe2$outcome)
+design_matrix <- model.matrix(~ 0 + combined_outcome)
+colnames(design_matrix) <- c("ABMR", "non_rejection", "TCMR")
+contrast_matrix <- makeContrasts(
+    nonrejVSabmr = non_rejection - ABMR,
+    nonrejVStcmr = non_rejection - TCMR,
+    nonrejVSrej = non_rejection - (1 / 2 * (ABMR + TCMR)), levels = colnames(design_matrix))
+limma_fit <- lmFit(exprSet, design = design_matrix)
+limma_fit <- contrasts.fit(limma_fit, contrasts = contrast_matrix)
+limma_fit <- eBayes(limma_fit)
+tT <- topTable(limma_fit, n = nrow(limma_fit))
+top10 <- rownames(tT[order(tT$adj.P.Val),][1:10,])
+top50 <- rownames(tT[order(tT$adj.P.Val),][1:50,])
+top100 <- rownames(tT[order(tT$adj.P.Val),][1:100,])
+top138 <- rownames(tT[order(tT$adj.P.Val),][1:138,])
+#topTable(limma_fit, n = nrow(limma_fit), coef="nonrejVSabmr")
+```
+
+
+Visualising features that are different between stable and rejection with volcano plot
+
+```{r}
+ggplot(tT, aes(nonrejVSabmr, -log10(P.Value))) +
+  geom_point(aes(colour = -log10(P.Value)), alpha = 1/3, size = 1) +
+  scale_colour_gradient(low = "blue", high = "red") +
+  xlab("log2 fold change") + ylab("-log10 p-value") + ggtitle("Volcano plot for Non-rejection vs ABMR")
+
+
+ggplot(tT, aes(nonrejVStcmr, -log10(P.Value))) +
+  geom_point(aes(colour = -log10(P.Value)), alpha = 1/3, size = 1) +
+  scale_colour_gradient(low = "blue", high = "red") +
+  xlab("log2 fold change") + ylab("-log10 p-value") + ggtitle("Volcano plot for Non-rejection vs TCMR")
+
+
+ggplot(tT, aes(nonrejVSrej, -log10(P.Value))) +
+  geom_point(aes(colour = -log10(P.Value)), alpha = 1/3, size = 1) +
+  scale_colour_gradient(low = "blue", high = "red") +
+  xlab("log2 fold change") + ylab("-log10 p-value") + ggtitle("Volcano plot for Non-rejection vs Rejection")
+
+```
+
+
+Visualising the heatmap for the top 100 differentially expressed genes selected using Limma
+
+```{r, message=F}
+top100_expr <- exprSet[rownames(exprSet) %in% top100, ]
+breaks <- seq(min(top100_expr), max(top100_expr), length.out = 100)
+color_palette <- colorRampPalette(c('dodgerblue4', 'white', 'yellow'))(99)
+sample_annotation <- data.frame(Group = factor(combined_outcome))
+rownames(sample_annotation) <- colnames(top100_expr)
+annotation_colors <- c(ABMR='firebrick4', TCMR='darkseagreen3', `non-rejection`='white')
+annotation_col_colors <- list(Group = annotation_colors)
+pheatmap(top100_expr,
+         color = color_palette,
+         breaks = breaks,
+         annotation_col = sample_annotation,
+         annotation_colors = annotation_col_colors,
+         fontsize = 3,
+         fontsize_row = 3,
+         fontsize_col = 3,
+         clustering_method = "complete",
+         scale = "row",
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         legend = TRUE)
+```
+
+
+Selecting the top differentially expressed genes using Lasso
+
+```{r, message=F}
+#lambda =1
+group_numeric <- as.numeric(factor(combined_outcome))
+x <- t(exprSet)
+set.seed(3888)
+cv_lasso <- cv.glmnet(x, group_numeric, alpha = 1)
+opt_lambda <- cv_lasso$lambda.1se
+final_lasso <- glmnet(x, group_numeric, alpha = 1, lambda = opt_lambda)
+lasso_coef <- coef(final_lasso, s = opt_lambda)
+selected_genes <- rownames(exprSet)[which(lasso_coef[-1,] != 0)]
+
+
+```
+
+
+Visualising the heatmap for the top differentially expressed genes selected using Lasso
+
+```{r}
+selected_lasso <- exprSet[rownames(exprSet) %in% selected_genes, ]
+breaks <- seq(min(selected_lasso), max(selected_lasso), length.out = 136)
+color_palette <- colorRampPalette(c('dodgerblue4', 'white', 'yellow'))(135)
+sample_annotation <- data.frame(Group = factor(combined_outcome))
+rownames(sample_annotation) <- colnames(selected_lasso)
+annotation_colors <- c(ABMR='firebrick4', TCMR='darkseagreen3', `non-rejection`='white')
+annotation_col_colors <- list(Group = annotation_colors)
+pheatmap(selected_lasso,
+         color = color_palette,
+         breaks = breaks,
+         annotation_col = sample_annotation,
+         annotation_colors = annotation_col_colors,
+         fontsize = 3,
+         fontsize_row = 3,
+         fontsize_col = 3,
+         clustering_method = "complete",
+         scale = "row",
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         legend = TRUE)
+```
+
+
+Evaluating the performance of classifiers on unseen data with feature selection using Lasso
+
+```{r}
+set.seed(3888)
+X = t(exprSet)
+y = factor(combined_outcome)
+cvK = 5   
+n_sim = 20
+cv_accuracy_rf = cv_accuracy_svm = cv_accuracy_knn = numeric(n_sim)
+for (i in 1:n_sim) {
+  cvSets = cvFolds(nrow(X), cvK) 
+  cv_accuracy_folds_rf = cv_accuracy_folds_svm = cv_accuracy_folds_knn = numeric(cvK)
+  for (j in 1:cvK) {
+    test_id = cvSets$subsets[cvSets$which == j]
+    X_train = X[-test_id,]
+    X_test = X[test_id,]
+    y_train = y[-test_id]
+    y_test = y[test_id]
+    
+    group_numeric <- as.numeric(y_train)
+    cv_lasso <- cv.glmnet(X_train, group_numeric, alpha = 1)
+    opt_lambda <- cv_lasso$lambda.min
+    
+    final_lasso <- glmnet(X_train, group_numeric, alpha = 1, lambda = opt_lambda)
+    lasso_coef <- coef(final_lasso, s = opt_lambda)
+    lasso_genes <- rownames(exprSet)[which(lasso_coef[-1,] != 0)]
+    X_train = X_train[,lasso_genes]
+    X_test = X_test[,lasso_genes]
+    
+    rf_fit = randomForest(x = X_train, y = y_train)
+    predictions_rf = predict(rf_fit, X_test)
+    cv_accuracy_folds_rf[j] = mean(y_test == predictions_rf)
+    
+    knn_fit = class::knn(train = X_train, test = X_test, cl = y_train, k = 5)
+    cv_accuracy_folds_knn[j] = mean(y_test == knn_fit)
+    svm_fit = svm(X_train, y_train)
+    predictions_svm = predict(svm_fit, X_test)
+    cv_accuracy_folds_svm[j] = mean(y_test == predictions_svm)
+  }
+  
+  cv_accuracy_rf[i] = mean(cv_accuracy_folds_rf)
+  cv_accuracy_knn[i] = mean(cv_accuracy_folds_knn)
+  cv_accuracy_svm[i] = mean(cv_accuracy_folds_svm)
+}
+boxplot(cv_accuracy_rf, cv_accuracy_knn, cv_accuracy_svm, names = c("RF", "KNN (k = 5)", "SVM"))
+```

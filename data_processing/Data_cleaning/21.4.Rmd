@@ -1,0 +1,265 @@
+---
+title: '20.4'
+author: '520004915'
+date: "2024-04-19"
+output: html_document
+---
+#load packages
+```{r setup, include=FALSE}
+library(caret)
+library(cvTools)
+library(dplyr)
+library(e1071)
+library(GEOquery)
+library(ggplot2)
+library(glmnet)
+library(limma)
+library(pheatmap)
+library(randomForest)
+library(stringr)
+library(tidyverse)
+rm(list = ls())
+```
+#laod data sets & cleaning & gene probe sub
+## 1. 'GSE36059'
+```{r}
+gse1 <- 'GSE36059'
+eSet1 <- getGEO('GSE36059')
+eSet1 <- eSet1$GSE36059_series_matrix.txt.gz
+exp1 <- exprs(eSet1)
+phe1 <- pData(phenoData(eSet1))
+feature1 <- fData(eSet1)
+```
+### clean feature
+```{r}
+f1 <-feature1%>% filter(`Gene Symbol` != '', !is.na(`Gene Symbol`))
+#f1[grepl('///', f1$`Gene Symbol`), ] after checking, i found they are different genes so i remove
+f1$'Gene Symbol' <- sapply(strsplit(f1$'Gene Symbol', ' /// '), function(x) x[1])
+```
+### probe sub (add gene sybol)
+```{r}
+gene_symbols1 <- f1[, c(1, 11)]
+expr1 <- as.data.frame(exp1)
+expr1[, 'ID'] <- rownames(expr1)
+expr1 <- merge(x = expr1, y = gene_symbols1, by.x = 'ID')
+```
+### remove duplication (keep mean)
+```{r}
+#table(duplicated(expr1$`Gene Symbol`)) #22902 suplication
+expre1 <- limma::avereps(expr1[,-c(1,ncol(expr1))], ID = expr1$`Gene Symbol`)
+expre1 <- as.data.frame(expre1)
+expression1 <- expre1[, -c(1,ncol(expre1))]
+dim(expression1)
+```
+### use expr to filter pheno
+```{r}
+pheno1 <- phe1[rownames(phe1) %in% colnames(expression1), ]
+```
+### set group
+```{r}
+pheno1 <- pheno1 %>% 
+  filter(`diagnosis (tcmr,abmr,mixed,non-rejecting):ch1` %in% c('ABMR', 'TCMR'))%>%
+  mutate(Outcome = `diagnosis (tcmr,abmr,mixed,non-rejecting):ch1`)
+table(pheno1$Outcome)
+```
+## 2. 'GSE129166'
+```{r}
+gse2 <- 'GSE129166'
+eSet2 <- getGEO('GSE129166')
+eSet2 <- eSet2$GSE129166_series_matrix.txt.gz
+exp2 <- exprs(eSet2)
+phe2 <- pData(phenoData(eSet2))
+feature2 <- fData(eSet2)
+```
+### clean feature
+```{r}
+f2 <-feature2%>% filter(`Gene Symbol` != '', !is.na(`Gene Symbol`))
+f2$'Gene Symbol' <- sapply(strsplit(f2$'Gene Symbol', ' /// '), function(x) x[1])
+```
+### probe sub (add gene sybol)
+```{r}
+gene_symbols2 <- f2[, c(1, 11)]
+expr2 <- as.data.frame(exp2)
+expr2[, 'ID'] <- rownames(expr2)
+expr2 <- merge(x = expr2, y = gene_symbols2, by.x = 'ID')
+```
+### remove duplication (keep mean)
+```{r}
+#table(duplicated(expr2$`Gene Symbol`)) #22902 suplication
+expre2 <- limma::avereps(expr2[,-c(1,ncol(expr2))], ID = expr2$`Gene Symbol`)
+expre2 <- as.data.frame(expre2)
+expression2<- expre2[, -c(1,ncol(expre2))]
+dim(expression2)
+```
+### use expr to filter pheno
+```{r}
+pheno2 <- phe2[rownames(phe2) %in% colnames(expression2), ]
+```
+### set group
+```{r}
+pheno2 <- pheno2 %>%
+  mutate(
+    ABMR_Status = ifelse(`abmr (no:ch1` == '0_Yes:1): 1', 'ABMR', 'ABMR Stable'),
+    TCMR_Status = ifelse(`tcmr (no:ch1` == '0_borderline:1_TCMR:2): 1', 'TCMR', 'TCMR Stable'),
+    Outcome = ifelse(ABMR_Status == 'ABMR' & TCMR_Status == 'TCMR Stable', 'ABMR',
+                     ifelse(ABMR_Status == 'ABMR Stable' & TCMR_Status == 'TCMR', 'TCMR', NA))
+  )%>%
+  na.omit(Outcome)
+table(pheno2$Outcome)
+```
+## 3. GSE192444
+```{r}
+gse3 <- 'GSE192444'
+eSet3 <- getGEO('GSE192444')
+eSet3 <- eSet3$GSE192444_series_matrix.txt.gz
+exp3 <- exprs(eSet3)
+phe3<- pData(phenoData(eSet3))
+feature3 <- fData(eSet3)
+```
+### clean feature
+```{r}
+f3 <-feature3%>% filter(`Gene Symbol` != '', !is.na(`Gene Symbol`))
+f3$'Gene Symbol' <- sapply(strsplit(f3$'Gene Symbol', ' /// '), function(x) x[1])
+```
+### probe sub (add gene sybol)
+```{r}
+gene_symbols3 <- f3[, c(1, 15)]
+expr3 <- as.data.frame(exp3)
+expr3[, 'ID'] <- rownames(expr3)
+expr3 <- merge(x = expr3, y = gene_symbols3, by.x = 'ID')
+```
+### remove duplication (keep mean)
+```{r}
+table(duplicated(expr3$`Gene Symbol`)) #29822  suplication
+expre3 <- limma::avereps(expr3[,-c(1,ncol(expr3))], ID = expr3$`Gene Symbol`)
+expre3 <- as.data.frame(expre3)
+expression3<- expre3[, -c(1,ncol(expre3))]
+dim(expression3)
+```
+### use expr to filter pheno
+```{r}
+pheno3 <- phe3[rownames(phe3) %in% colnames(expression3), ]
+```
+### set group
+```{r}
+pheno3 <- pheno3 %>%
+  mutate(
+    Outcome = ifelse(`mmdx (abmr, tcmr, mixed, nr, pabmr, ptcmr):ch1` == 'ABMR','ABMR',
+                     ifelse(`mmdx (abmr, tcmr, mixed, nr, pabmr, ptcmr):ch1`=='TCMR', 'TCMR', NA))
+  )%>%
+  na.omit(Outcome)
+table(pheno3$Outcome)
+```
+## 4. GSE124203
+```{r}
+gse4 <- 'GSE124203'
+eSet4 <- getGEO('GSE124203')
+eSet4 <- eSet4$GSE124203_series_matrix.txt.gz
+exp4 <- exprs(eSet4)
+phe4<- pData(phenoData(eSet4))
+feature4 <- fData(eSet4)
+```
+### clean feature
+```{r}
+f4 <-feature4%>% filter(`Gene Symbol` != '', !is.na(`Gene Symbol`))
+f4$'Gene Symbol' <- sapply(strsplit(f4$'Gene Symbol', ' /// '), function(x) x[1])
+```
+### probe sub (add gene sybol)
+```{r}
+gene_symbols4 <- f4[, c(1, 15)]
+expr4 <- as.data.frame(exp4)
+expr4[, 'ID'] <- rownames(expr4)
+expr4 <- merge(x = expr4, y = gene_symbols4, by.x = 'ID')
+```
+### remove duplication (keep mean)
+```{r}
+table(duplicated(expr4$`Gene Symbol`)) #29822  suplication
+expre4 <- limma::avereps(expr4[,-c(1,ncol(expr4))], ID = expr4$`Gene Symbol`)
+expre4 <- as.data.frame(expre4)
+expression4<- expre4[, -c(1,ncol(expre4))]
+dim(expression4)
+```
+### use expr to filter pheno
+```{r}
+pheno4 <- phe4[rownames(phe4) %in% colnames(expression4), ]
+```
+### set group
+```{r}
+pheno4 <- pheno4 %>%
+  mutate(
+    Outcome = ifelse(`mmdx (abmr, pabmr, mixed, tcmr, ptcmr, nr, na):ch1` == 'ABMR','ABMR',
+                     ifelse(`mmdx (abmr, pabmr, mixed, tcmr, ptcmr, nr, na):ch1`=='TCMR', 'TCMR', NA)))%>%
+  filter(!is.na(Outcome))
+table(pheno4$Outcome)
+```
+## 5. GSE98320
+```{r}
+gse5 <- 'GSE98320'
+eSet5 <- getGEO('GSE98320')
+eSet5 <- eSet5$GSE98320_series_matrix.txt.gz
+exp5 <- exprs(eSet5)
+phe5 <- pData(phenoData(eSet5))
+feature5 <- fData(eSet5)
+```
+### clean feature
+```{r}
+f5 <-feature5%>% filter(`Gene Symbol` != '', !is.na(`Gene Symbol`))
+f5$'Gene Symbol' <- sapply(strsplit(f5$'Gene Symbol', ' /// '), function(x) x[1])
+```
+### probe sub (add gene sybol)
+```{r}
+gene_symbols5 <- f5[, c(1, 17)]
+expr5 <- as.data.frame(exp5)
+expr5[, 'ID'] <- rownames(expr5)
+expr5 <- merge(x = expr5, y = gene_symbols5, by.x = 'ID')
+```
+### remove duplication (keep mean)
+```{r}
+table(duplicated(expr5$`Gene Symbol`)) #29911  suplication
+expre5 <- limma::avereps(expr5[,-c(1,ncol(expr5))], ID = expr5$`Gene Symbol`)
+expre5 <- as.data.frame(expre5)
+expression5<- expre5[, -c(1,ncol(expre5))]
+dim(expression5)
+```
+### use expr to filter pheno
+```{r}
+pheno5 <- phe5[rownames(phe5) %in% colnames(expression5), ]
+```
+### set group
+```{r}
+pheno5 <- pheno5 %>%
+  mutate(
+    Outcome = ifelse(`d96:ch1` == 'ABMR','ABMR',
+                     ifelse(`d96:ch1`=='TCMR', 'TCMR', NA)))%>%
+  filter(!is.na(Outcome))
+table(pheno5$Outcome)
+```
+#group
+```{r}
+group <- c(pheno1$Outcome,pheno2$Outcome,pheno3$Outcome,pheno4$Outcome,pheno5$Outcome)
+length(group)
+```
+# combine data sets
+```{r,message=F}
+library(sva)
+common_genes <- Reduce(intersect, list(rownames(expression1), rownames(expression2), 
+                                       rownames(expression3), rownames(expression4), 
+                                       rownames(expression5)))
+expression1_common <- expression1[common_genes, , drop = FALSE]
+expression2_common <- expression2[common_genes, , drop = FALSE]
+expression3_common <- expression3[common_genes, , drop = FALSE]
+expression4_common <- expression4[common_genes, , drop = FALSE]
+expression5_common <- expression5[common_genes, , drop = FALSE]
+combined_expression <- cbind(expression1_common, expression2_common, 
+                             expression3_common, expression4_common, 
+                             expression5_common)
+dim(combined_expression)
+```
+# checking batch effect (PCA plot)
+```{r}
+library(ggfortify)
+gse_pca <- prcomp(t(combined_expression))
+batches <- factor(rep(1:5, each = 10))
+
+```
+

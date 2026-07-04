@@ -1,0 +1,78 @@
+---
+title: "data celaning"
+author: '520004915'
+date: "2024-03-30"
+output: html_document
+---
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(GEOquery)
+library(limma)
+library(caret)
+gse <- getGEO('GSE21374')# all samples are AR (rejection)
+gse <- gse$GSE21374_series_matrix.txt.gz
+
+feature<-fData(gse)
+eMat<-exprs(gse)
+eMat_df <- as.data.frame(eMat)
+phe <- pData(phenoData(gse))
+
+#---Data cleaning
+missing_summary <- apply(feature,2,function(x) sum(x %in% ''))
+#===
+missing_symbol<-feature  %>% 
+  select ('ID','Gene Symbol')%>%
+  filter(`Gene Symbol` == '', !is.na(`Gene Symbol`))
+proportion_of_missing_symbol <- nrow(missing_symbol)/nrow(feature)
+
+## drop all [missing genes]
+feature_new <-feature %>% filter(`Gene Symbol` != '', !is.na(`Gene Symbol`))
+feature_new <- na.omit(feature_new)
+## keep one gene symbol
+#### I found there are many IDs is corresponding to more than 1 gene symbols, to formmat the data I will keep the first gene symbol
+feature_new$'Gene Symbol' <- sapply(strsplit(feature_new$'Gene Symbol', ' /// '), function(x) x[1])
+##after dropping rows from features, to keep the consistency, we also need to drop the corresponding rows in eMat
+eMat_new <- eMat_df[rownames(eMat_df) %in% feature_new$ID, ]
+
+##[Outliers]For eMat_new, the gene expression data frame, we need to keep those highly expressed genes
+gene_means <- rowMeans(eMat_new)
+gene_percentile <- rank(gene_means) / length(gene_means)
+threshold <- 0.25 # we wanna keep 75% of the genes by ranking
+filtered_genes <- eMat_new[gene_percentile > threshold,]
+
+  ###**** you can add your visualisation of genes here (same as lab, do a boxplot)
+## [normalisation]
+exprSet <- normalizeBetweenArrays(filtered_genes)# normalisation
+  ###*** you can add your visualisation here (boxplot, same as above) and we can compare 2 boxplots
+### if the differences between max and min are within 50, it means we do not need log2 transform
+qx <- as.numeric(quantile(exprSet,c(0.,0.25,0.5,0.75,0.99,1.0),na.rm=T))
+logC <- (qx[5]>100) ||
+           (qx[6]-qx[1]>50 && qx[2]>0) ||
+            (qx[2]>0 && qx[2]<1 && qx[4]>1 && qx[4]<2)
+if (logC){
+  exprSet [which(exprSet <=0)] <- NaN
+  exprSet_clean <- log2(exprSet)
+  print('log2 transformation finished')
+}else{
+  print('does not need log2 transformation')
+}
+
+
+###[Cleaning Done]
+expression <- as.data.frame(exprSet)
+expression
+
+```
+
+```{r}
+## Converting variables to numeric data type
+phe$`time from biopsy to failure/censoring (days):ch1` <- as.numeric(phe$`time from biopsy to failure/censoring (days):ch1`)
+phe$`time of biopsy post transplant (days):ch1` <- as.numeric(phe$`time of biopsy post transplant (days):ch1`)
+
+## Processing patient transplant outcome and subsequent graft condition variables
+gse$outcome <- ifelse(grepl("nonrej", phe$`rejection/non rejection:ch1`), "Non-Rejection", "Rejection")
+gse$condition <- ifelse(grepl("0", phe$`failed=1/non failed=0:ch1`), "Non-failed", "Failed")
+```
+

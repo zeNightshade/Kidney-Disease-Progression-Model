@@ -1,0 +1,302 @@
+---
+title: "FIRST_5_STEPS"
+author: '520004915'
+date: "2024-04-11"
+output: html_document
+---
+```{r, warning = FALSE}
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(GEOquery)
+library(limma)
+library(caret)
+library(stringr)
+library(reshape)
+rm(list=ls())
+
+gse1 ='GSE36059'
+gse2 ='GSE129166'
+
+eSet1 <- getGEO('GSE36059')
+eSet1<- eSet1$GSE36059_series_matrix.txt.gz
+eSet2 <- getGEO('GSE129166')
+eSet2<- eSet2$GSE129166_series_matrix.txt.gz
+
+exp1 <- exprs(eSet1)
+phe1 <- pData(phenoData(eSet1))
+feature1<-fData(eSet1)
+
+exp2 <- exprs(eSet2)
+phe2 <- pData(phenoData(eSet2))
+feature2<-fData(eSet2)
+
+eSet1 <- getGEO('GSE36059', GSEMatrix = TRUE)
+if (length(eSet1) > 0) {
+    eSet1 <- eSet1[[1]]
+}
+
+```
+
+```{r}
+#clean features
+f1 <-feature1 %>% filter(`Gene Symbol` != '', !is.na(`Gene Symbol`))
+f1$'Gene Symbol' <- sapply(strsplit(f1$'Gene Symbol', ' /// '), function(x) x[1])
+f1$'Gene Symbol' <- make.unique(f1$'Gene Symbol', sep = '_')
+
+f2 <-feature2 %>% filter(`Gene Symbol` != '', !is.na(`Gene Symbol`))
+f2$'Gene Symbol' <- sapply(strsplit(f2$'Gene Symbol', ' /// '), function(x) x[1])
+f2$'Gene Symbol' <- make.unique(f2$'Gene Symbol', sep = '_')
+
+## Rename probe IDs in expression matrix to gene symbols
+exp1 <- as.data.frame(exp1)
+# Probe ID in column 1, gene symbol in column 11
+gene_symbols1 <- f1[, c(1, 11)]
+exp1[, 'ID'] <- rownames(exp1)
+exp1 <- merge(x = exp1, y = gene_symbols1, by.x = 'ID')
+f1 <- f1 %>% filter(`ID` %in% exp1$`ID`)
+exp1[, 'Gene Symbol'] <- make.unique(exp1[, 'Gene Symbol'], sep = '_')
+# Set gene symbols as the rownames of the data frame
+rownames(exp1) <- exp1[, 'Gene Symbol']
+exp1[, c('ID', 'Gene Symbol')] <- NULL
+exp1 <- as.matrix(exp1)
+
+exp2 <- as.data.frame(exp2)
+gene_symbols2 <- f2[, c(1, 11)]
+exp2[, 'ID'] <- rownames(exp2)
+exp2 <- merge(x = exp2, y = gene_symbols2, by.x = 'ID')
+f2 <- f2 %>% filter(`ID` %in% exp2$`ID`)
+exp2[, 'Gene Symbol'] <- make.unique(exp2[, 'Gene Symbol'], sep = '_')
+rownames(exp2) <- exp2[, 'Gene Symbol']
+exp2[, c('ID', 'Gene Symbol')] <- NULL
+exp2 <- as.matrix(exp2)
+
+#conbime gene expressions
+table(rownames(exp1) %in% rownames(exp2))
+exp1 <- exp1[intersect(rownames(exp1),rownames(exp2)),]
+exp2 <- exp2[intersect(rownames(exp1),rownames(exp2)),]
+
+if(!identical(rownames(phe1),colnames(exp1))) exp1 = exp1[,match(rownames(phe1),colnames(exp1))]
+if(!identical(rownames(phe2),colnames(exp2))) exp2 = exp2[,match(rownames(phe2),colnames(exp2))]
+
+exp <- cbind(exp1,exp2)
+
+#remove batch effects
+batch_info <- c(rep(1, ncol(exp1)), rep(2, ncol(exp2)))
+exprSet_corrected <- removeBatchEffect(exp, batch_info)
+##set groups
+phe1$outcome <- ifelse(str_detect(phe1$title, 'non-rejecting'), 'non-rejection',
+                       ifelse(str_detect(phe1$title, 'ABMR'), 'ABMR',
+                              ifelse(str_detect(phe1$title, 'TCMR'), 'TCMR', 'Other')))
+phe1 <- phe1%>% filter(outcome != 'Other')#remove other
+
+phe2 <-phe2 %>% mutate(
+  ABMR_Status = ifelse(`abmr (no:ch1` == '0_Yes:1): 1', 'ABMR', 'ABMR Stable'),
+  TCMR_Status = ifelse(`tcmr (no:ch1` == '0_borderline:1_TCMR:2): 1', 'TCMR', 'TCMR Stable')
+  )%>%
+    filter(!(ABMR_Status == 'ABMR' & TCMR_Status == 'TCMR')) %>%
+  mutate(
+    outcome = case_when(
+      ABMR_Status == 'ABMR Stable' & TCMR_Status == 'TCMR Stable' ~ 'non-rejection',
+      ABMR_Status == 'ABMR Stable' ~ 'TCMR',
+      TCMR_Status == 'TCMR Stable' ~ 'ABMR',
+      TRUE ~ NA_character_
+    )
+  )
+###remove both TCMR and ABMR, then if the original sting was TCMR Stable, then it appears to be ABMR
+
+## Remove corresponding columns of geo accession data from expression matrix that were dropped in pheno data
+exprSet_corrected <- exprSet_corrected[, colnames(exprSet_corrected) %in% c(phe1$geo_accession, phe2$geo_accession)]
+
+group <- table(c(phe1$outcome, phe2$outcome))
+
+#normalisation
+combine_symbol <- union(f1$`Gene Symbol`, f2$`Gene Symbol`)
+eMat <- exprSet_corrected[rownames(exprSet_corrected) %in% combine_symbol, ]
+gene_means <- rowMeans(eMat)
+gene_percentile <- rank(gene_means) / length(gene_means)
+threshold <- 0.25
+filtered_genes <- eMat[gene_percentile > threshold,]
+## [normalisation]
+exprSet <- normalizeBetweenArrays(filtered_genes)
+qx <- as.numeric(quantile(exprSet,c(0.,0.25,0.5,0.75,0.99,1.0),na.rm=T))
+logC <- (qx[5]>100) ||
+           (qx[6]-qx[1]>50 && qx[2]>0) ||
+            (qx[2]>0 && qx[2]<1 && qx[4]>1 && qx[4]<2)
+if (logC){
+  exprSet [which(exprSet <=0)] <- NaN
+  exprSet_clean <- log2(exprSet)
+  print('log2 transformation finished')
+}else{
+  print('does not need log2 transformation')
+}
+#normalisaton done, see how it looks
+boxplot(exp)#after combination
+boxplot(exprSet_corrected)#bacth effected
+boxplot(exprSet)#normaled
+```
+
+
+#Feature Selection - limma 
+
+```{r}
+#feature selection - limma
+outcomes <- c(phe1$outcome, phe2$outcome)
+outcomes <- gsub("-", "_", outcomes) # Replace hyphens with underscores
+
+phe <- factor(outcomes)
+design <- model.matrix(~ 0 + phe) #design matrix
+colnames(design) <- levels(phe)
+
+# Define contrasts
+contrast.matrix <- makeContrasts(
+  TCMRvsNon = TCMR - non_rejection,
+  ABMRvsNon = ABMR - non_rejection,
+  TCMRvsABMR = non_rejection - (1 / 2 * (TCMR - ABMR)),
+  levels = design)
+
+# Fit the model
+fit <- lmFit(exprSet, design)
+fit2 <- contrasts.fit(fit, contrast.matrix)
+fit2 <- eBayes(fit2)
+```
+
+```{r}
+#  top10, top50 and top100
+topResults_10 <- topTable(fit2, n=10 )
+topResults_50 <- topTable(fit2, n=50 )
+topResults_100 <- topTable(fit2, n=100)
+```
+
+```{r}
+# Boxplot
+genes_10 <- rownames(topResults_10)
+genes_50 <- rownames(topResults_50)
+genes_100 <- rownames(topResults_100)
+
+# Subset exprSet for top 10, 50, 100
+exprSet_10 <- exprSet[rownames(exprSet) %in% genes_10, ]
+exprSet_50 <- exprSet[rownames(exprSet) %in% genes_50, ]
+exprSet_100 <- exprSet[rownames(exprSet) %in% genes_100, ]
+
+# Melting and categories
+melted_10 <- melt(exprSet_10)
+melted_10$category <- "Top 10"
+
+melted_50 <- melt(exprSet_50)
+melted_50$category <- "Top 50"
+
+melted_100 <- melt(exprSet_100)
+melted_100$category <- "Top 100"
+
+# Combine
+meltedData <- rbind(melted_10, melted_50, melted_100)
+colnames(meltedData) <- c("Sample", "Gene", "Expression", "Category")
+
+ggplot(meltedData, aes(x = Category, y = Expression, fill = Category)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Expression differences for Top 10, 50, 100 Genes",
+       x = "Gene Category",
+       y = "Expression Level") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+#do cross-validation on different numbers of features selected to obtain the best number of selected features
+```{r}
+library(caret)
+library(nnet)  # for multinom function
+set.seed(123)  # for reproducibility
+
+# Assuming 'exprSet' and 'outcomes' are already defined
+data_frame <- data.frame(t(exprSet))
+data_frame$outcome <- as.factor(outcomes)  # Ensure outcomes are a factor
+
+# Define training control
+train_control <- trainControl(
+  method = "cv",  # k-fold cross-validation
+  number = 10,  # number of folds
+  savePredictions = "final",
+  classProbs = TRUE  # for ROC/AUC if needed
+)
+
+# List to store models
+results <- list()
+
+# Iterate over different numbers of top genes
+for (n_top_genes in c(10, 50, 100)) {
+  # Subset the top N genes
+  genes_subset <- topTable(fit2, n=n_top_genes)$Gene
+  subset_exprSet <- data_frame[, genes_subset]
+
+  # Model fitting using multinomial logistic regression
+  model_fit <- train(
+    x = subset_exprSet, 
+    y = data_frame$outcome,
+    method = "multinom",  # using multinomial logistic regression
+    trControl = train_control,
+    metric = "Accuracy"  # or "ROC" if classProbs=TRUE
+  )
+  
+  # Store results
+  results[[paste("top", n_top_genes, "genes")]] <- model_fit
+}
+
+# Review model performances
+lapply(results, function(x) x$results)
+
+```
+
+
+build svm model
+```{r}
+library(kernlab)
+library(caret)
+
+# Preprocessing data to remove NAs and scale inputs
+data_frame <- data.frame(t(exprSet))
+data_frame <- na.omit(data_frame)  # Remove rows with NAs
+data_frame$outcome <- as.factor(outcomes)  # Ensure outcomes are a factor
+
+# Define training control with added preprocessing steps
+train_control <- trainControl(
+  method = "cv",
+  number = 10,
+  savePredictions = "final",
+  classProbs = TRUE,
+  summaryFunction = multiClassSummary,
+  allowParallel = TRUE
+)
+
+# List to store SVM models
+svm_results <- list()
+
+# Iterate over different numbers of top genes
+for (n_top_genes in c(10, 50, 100)) {
+  genes_subset <- topTable(fit2, n=n_top_genes)$Gene
+  subset_exprSet <- data_frame[, genes_subset, drop = FALSE]
+
+  # Add pre-processing steps directly in the train function
+  svm_fit <- train(
+    x = subset_exprSet,
+    y = data_frame$outcome,
+    method = "svmRadial",
+    preProcess = c("center", "scale"),  # Centering and scaling
+    trControl = train_control,
+    metric = "Accuracy",
+    tuneGrid = expand.grid(sigma = c(0.01, 0.05, 0.1), C = c(0.1, 1, 10))
+  )
+  
+  svm_results[[paste("SVM_top", n_top_genes, "genes")]] <- svm_fit
+}
+
+# Review SVM model performances
+lapply(svm_results, function(x) x$results)
+
+# Optionally, plot performance metrics
+
+```
+
+
+

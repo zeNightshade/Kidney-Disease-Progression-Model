@@ -1,0 +1,495 @@
+---
+title: "lab_2"
+author: '520004915'
+date: "2024-04-22"
+output: html_document
+---
+---
+title: '20.4'
+author: '520004915'
+date: "2024-04-19"
+output: html_document
+---
+#load packages
+```{r setup,s include=FALSE}
+rm(list = ls())
+library(caret)
+library(cvTools)
+library(dplyr)
+library(e1071)
+library(GEOquery)
+library(ggplot2)
+library(glmnet)
+library(limma)
+library(pheatmap)
+library(randomForest)
+library(stringr)
+library(tidyverse)
+```
+#laod data sets & cleaning & gene probe sub
+## 1. 'GSE36059'
+```{r}
+gse1 <- 'GSE36059'
+eSet1 <- getGEO('GSE36059')
+eSet1 <- eSet1$GSE36059_series_matrix.txt.gz
+exp1 <- exprs(eSet1)
+phe1 <- pData(phenoData(eSet1))
+feature1 <- fData(eSet1)
+```
+### clean feature
+```{r}
+f1 <-feature1%>% filter(`Gene Symbol` != '', !is.na(`Gene Symbol`))
+#f1[grepl('///', f1$`Gene Symbol`), ] after checking, i found they are different genes so i remove
+f1$'Gene Symbol' <- sapply(strsplit(f1$'Gene Symbol', ' /// '), function(x) x[1])
+```
+### probe sub (add gene sybol)
+```{r}
+gene_symbols1 <- f1[, c(1, 11)]
+expr1 <- as.data.frame(exp1)
+expr1[, 'ID'] <- rownames(expr1)
+expr1 <- merge(x = expr1, y = gene_symbols1, by.x = 'ID')
+```
+### add index
+```{r}
+#add index to phenotype
+rownames(phe1) <- paste(rownames(phe1), '1', sep='_')
+colnames(expr1) <- paste(colnames(expr1), '1', sep='_')
+```
+### remove duplication (keep mean)
+```{r}
+#table(duplicated(expr1$`Gene Symbol`)) #22902 suplication
+expre1 <- limma::avereps(expr1[,-c(1,ncol(expr1))], ID = expr1$`Gene Symbol`)
+expre1 <- as.data.frame(expre1)
+expression1 <- expre1[, -c(1,ncol(expre1))]
+dim(expression1)
+```
+### set group
+```{r}
+phe1 <- phe1[rownames(phe1) %in% colnames(expression1),]
+phe1$Outcome <- ifelse(str_detect(phe1$title, 'non-rejecting'), 'Stable',
+                       ifelse(str_detect(phe1$title, 'ABMR'), 'ABMR',
+                              ifelse(str_detect(phe1$title, 'TCMR'), 'TCMR', 'Other')))
+pheno1 <- phe1%>% filter(Outcome != 'Other')
+table(pheno1$Outcome)
+expression1 <- as.data.frame(expression1)
+expression1 <- expression1[, colnames(expression1) %in% rownames(pheno1)]
+expression1 <- as.matrix(expression1)
+```
+## 2. 'GSE129166'
+```{r}
+gse2 <- 'GSE129166'
+eSet2 <- getGEO('GSE129166')
+eSet2 <- eSet2$GSE129166_series_matrix.txt.gz
+exp2 <- exprs(eSet2)
+phe2 <- pData(phenoData(eSet2))
+feature2 <- fData(eSet2)
+```
+### clean feature
+```{r}
+f2 <-feature2%>% filter(`Gene Symbol` != '', !is.na(`Gene Symbol`))
+f2$'Gene Symbol' <- sapply(strsplit(f2$'Gene Symbol', ' /// '), function(x) x[1])
+```
+### probe sub (add gene sybol)
+```{r}
+gene_symbols2 <- f2[, c(1, 11)]
+expr2 <- as.data.frame(exp2)
+expr2[, 'ID'] <- rownames(expr2)
+expr2 <- merge(x = expr2, y = gene_symbols2, by.x = 'ID')
+```
+### add index
+```{r}
+#add index to phenotype
+rownames(phe2) <- paste(rownames(phe2), '2', sep='_')
+colnames(expr2) <- paste(colnames(expr2), '2', sep='_')
+```
+### remove duplication (keep mean)
+```{r}
+#table(duplicated(expr2$`Gene Symbol`)) #22902 suplication
+expre2 <- limma::avereps(expr2[,-c(1,ncol(expr2))], ID = expr2$`Gene Symbol`)
+expre2 <- as.data.frame(expre2)
+expression2<- expre2[, -c(1,ncol(expre2))]
+dim(expression2)
+```
+### set group
+```{r}
+phe2 <- phe2[rownames(phe2) %in% colnames(expression2),]
+pheno2 <-phe2 %>% mutate(
+  ABMR_Status = ifelse(`abmr (no:ch1` == '0_Yes:1): 1', 'ABMR', 'ABMR Stable'),
+  TCMR_Status = ifelse(`tcmr (no:ch1` == '0_borderline:1_TCMR:2): 1', 'TCMR', 'TCMR Stable')
+  )%>%
+    filter(!(ABMR_Status == 'ABMR' & TCMR_Status == 'TCMR')) %>%
+  mutate(
+    Outcome = case_when(
+      ABMR_Status == 'ABMR Stable' & TCMR_Status == 'TCMR Stable' ~ 'Stable',
+      ABMR_Status == 'ABMR Stable' ~ 'TCMR',
+      TCMR_Status == 'TCMR Stable' ~ 'ABMR',
+      TRUE ~ NA_character_
+    )
+  )
+table(pheno2$Outcome)
+expression2 <- as.data.frame(expression2)
+expression2 <- expression2[, colnames(expression2) %in% rownames(pheno2)]
+expression2 <- as.matrix(expression2)
+```
+## 3. GSE192444
+```{r}
+gse3 <- 'GSE192444'
+eSet3 <- getGEO('GSE192444')
+eSet3 <- eSet3$GSE192444_series_matrix.txt.gz
+exp3 <- exprs(eSet3)
+phe3<- pData(phenoData(eSet3))
+feature3 <- fData(eSet3)
+```
+### clean feature
+```{r}
+f3 <-feature3%>% filter(`Gene Symbol` != '', !is.na(`Gene Symbol`))
+f3$'Gene Symbol' <- sapply(strsplit(f3$'Gene Symbol', ' /// '), function(x) x[1])
+```
+### probe sub (add gene sybol)
+```{r}
+gene_symbols3 <- f3[, c(1, 15)]
+expr3 <- as.data.frame(exp3)
+expr3[, 'ID'] <- rownames(expr3)
+expr3 <- merge(x = expr3, y = gene_symbols3, by.x = 'ID')
+```
+### add index
+```{r}
+#add index to phenotype
+rownames(phe3) <- paste(rownames(phe3), '3', sep='_')
+colnames(expr3) <- paste(colnames(expr3), '3', sep='_')
+```
+### remove duplication (keep mean)
+```{r}
+table(duplicated(expr3$`Gene Symbol`)) #29822  suplication
+expre3 <- limma::avereps(expr3[,-c(1,ncol(expr3))], ID = expr3$`Gene Symbol`)
+expre3 <- as.data.frame(expre3)
+expression3<- expre3[, -c(1,ncol(expre3))]
+dim(expression3)
+```
+
+### set group
+```{r}
+phe3 <- phe3[rownames(phe3) %in% colnames(expression3),]
+phe3$Outcome <- ifelse(str_detect(phe3$`mmdx (abmr, tcmr, mixed, nr, pabmr, ptcmr):ch1`, 'ABMR'), 'ABMR',
+                       ifelse(str_detect(phe3$`mmdx (abmr, tcmr, mixed, nr, pabmr, ptcmr):ch1`, 'TCMR'), 'TCMR',
+                              ifelse(str_detect(phe3$`mmdx (abmr, tcmr, mixed, nr, pabmr, ptcmr):ch1`, 'NR'), 'Stable', 'Other')))
+pheno3 <- phe3%>% filter(Outcome != 'Other')
+table(pheno3$Outcome)
+expression3 <- as.data.frame(expression3)
+expression3 <- expression3[, colnames(expression3) %in% rownames(pheno3)]
+expression3 <- as.matrix(expression3)
+```
+## 4. GSE124203
+```{r}
+gse4 <- 'GSE124203'
+eSet4 <- getGEO('GSE124203')
+eSet4 <- eSet4$GSE124203_series_matrix.txt.gz
+exp4 <- exprs(eSet4)
+phe4<- pData(phenoData(eSet4))
+feature4 <- fData(eSet4)
+```
+### clean feature
+```{r}
+f4 <-feature4%>% filter(`Gene Symbol` != '', !is.na(`Gene Symbol`))
+f4$'Gene Symbol' <- sapply(strsplit(f4$'Gene Symbol', ' /// '), function(x) x[1])
+```
+### probe sub (add gene sybol)
+```{r}
+gene_symbols4 <- f4[, c(1, 15)]
+expr4 <- as.data.frame(exp4)
+expr4[, 'ID'] <- rownames(expr4)
+expr4 <- merge(x = expr4, y = gene_symbols4, by.x = 'ID')
+```
+### add index
+```{r}
+#add index to phenotype
+rownames(phe4) <- paste(rownames(phe4), '4', sep='_')
+colnames(expr4) <- paste(colnames(expr4), '4', sep='_')
+```
+### remove duplication (keep mean)
+```{r}
+table(duplicated(expr4$`Gene Symbol`)) #29822  suplication
+expre4 <- limma::avereps(expr4[,-c(1,ncol(expr4))], ID = expr4$`Gene Symbol`)
+expre4 <- as.data.frame(expre4)
+expression4<- expre4[, -c(1,ncol(expre4))]
+dim(expression4)
+```
+### set group
+```{r}
+phe4 <- phe4[rownames(phe4) %in% colnames(expression4),]
+phe4$Outcome <- ifelse(str_detect(phe4$`mmdx (abmr, pabmr, mixed, tcmr, ptcmr, nr, na):ch1`, 'ABMR'), 'ABMR',
+                       ifelse(str_detect(phe4$`mmdx (abmr, pabmr, mixed, tcmr, ptcmr, nr, na):ch1`, 'TCMR'), 'TCMR',
+                              ifelse(str_detect(phe4$`mmdx (abmr, pabmr, mixed, tcmr, ptcmr, nr, na):ch1`, 'NR'), 'Stable', 'Other')))
+pheno4 <- phe4%>% filter(Outcome != 'Other')
+table(pheno4$Outcome)
+expression4 <- as.data.frame(expression4)
+expression4 <- expression4[, colnames(expression4) %in% rownames(pheno4)]
+expression4 <- as.matrix(expression4)
+```
+## 5. GSE98320
+```{r}
+gse5 <- 'GSE98320'
+eSet5 <- getGEO('GSE98320')
+eSet5 <- eSet5$GSE98320_series_matrix.txt.gz
+exp5 <- exprs(eSet5)
+phe5 <- pData(phenoData(eSet5))
+feature5 <- fData(eSet5)
+```
+### clean feature
+```{r}
+f5 <-feature5%>% filter(`Gene Symbol` != '', !is.na(`Gene Symbol`))
+f5$'Gene Symbol' <- sapply(strsplit(f5$'Gene Symbol', ' /// '), function(x) x[1])
+```
+### probe sub (add gene sybol)
+```{r}
+gene_symbols5 <- f5[, c(1, 17)]
+expr5 <- as.data.frame(exp5)
+expr5[, 'ID'] <- rownames(expr5)
+expr5 <- merge(x = expr5, y = gene_symbols5, by.x = 'ID')
+```
+### add index
+```{r}
+#add index to phenotype
+rownames(phe5) <- paste(rownames(phe5), '5', sep='_')
+colnames(expr5) <- paste(colnames(expr5), '5', sep='_')
+```
+### remove duplication (keep mean)
+```{r}
+table(duplicated(expr5$`Gene Symbol`)) #29911  suplication
+expre5 <- limma::avereps(expr5[,-c(1,ncol(expr5))], ID = expr5$`Gene Symbol`)
+expre5 <- as.data.frame(expre5)
+expression5<- expre5[, -c(1,ncol(expre5))]
+dim(expression5)
+```
+### set group
+```{r}
+phe5 <- phe5[rownames(phe5) %in% colnames(expression5),]
+pheno5 <- phe5 %>%
+  mutate(
+    Outcome = ifelse(`d96:ch1` == 'ABMR','ABMR',
+                     ifelse(`d96:ch1`=='TCMR', 'TCMR', NA)))%>%
+  filter(!is.na(Outcome))
+table(pheno5$Outcome)
+expression5 <- as.data.frame(expression5)
+expression5 <- expression5[, colnames(expression5) %in% rownames(pheno5)]
+expression5 <- as.matrix(expression5)
+```
+
+#alignment
+```{r}
+top_75_percentile <- function(eMat) {
+  eMat <- as.data.frame(eMat)
+  hist(rowSums(eMat),breaks=50,main='row sum dist')
+  threshold <-quantile(rowSums(eMat),0.25)
+  filtered_eMat <- eMat[rowSums(eMat) > threshold,]
+  return (filtered_eMat)
+}
+expression1 <- top_75_percentile(expression1)
+expression2 <- top_75_percentile(expression2)
+expression3 <- top_75_percentile(expression3)
+expression4 <- top_75_percentile(expression4)
+expression5 <- top_75_percentile(expression5)
+phen1 <- phe1[rownames(phe1) %in% colnames(expression1),]
+phen2 <- phe2[rownames(phe2) %in% colnames(expression2),]
+phen3 <- phe3[rownames(phe3) %in% colnames(expression3),]
+phen4 <- phe4[rownames(phe4) %in% colnames(expression4),]
+phen5 <- phe5[rownames(phe5) %in% colnames(expression5),]
+```
+
+
+# combine data sets
+```{r,message=F}
+common_genes <- Reduce(intersect, list(rownames(expression1), rownames(expression2), 
+                                       rownames(expression3), rownames(expression4), 
+                                       rownames(expression5)))
+expression1_common <- expression1[common_genes, ]
+expression2_common <- expression2[common_genes, ]
+expression3_common <- expression3[common_genes, ]
+expression4_common <- expression4[common_genes, ]
+expression5_common <- expression5[common_genes, ]
+combined_expression <- cbind(expression1_common, expression2_common, 
+                             expression3_common, expression4_common, 
+                             expression5_common)
+dim(combined_expression)
+```
+# normalise
+```{r}
+eMat <- normalizeBetweenArrays(combined_expression)
+```
+
+# pca checking batch effect
+```{r}
+gse_pca <- prcomp(t(eMat))
+group <- c(pheno1$Outcome,pheno2$Outcome,pheno3$Outcome,pheno4$Outcome,pheno5$Outcome)
+batch_info <- c(rep(1, ncol(expression1_common)),
+                rep(2, ncol(expression2_common)),
+                rep(3, ncol(expression3_common)),
+                rep(4, ncol(expression4_common)),
+                rep(5, ncol(expression5_common)))
+df_toplot <- data.frame(group,
+                        pc1 = gse_pca$x[,1], pc2 = gse_pca$x[,2],
+                        batch = batch_info)
+df_toplot$batch <- as.factor(df_toplot$batch)
+ggplot(df_toplot, aes(x = pc1, y = pc2, color = group)) + 
+  geom_point(size = 1.5) + labs(colour = "Outcome") +
+  theme_minimal()
+ggplot(df_toplot, aes(x = pc1, y = pc2, color = batch)) + 
+  geom_point(size = 1.5) + labs(colour = "Batch") +
+  theme_minimal()
+```
+# remove batch effect
+```{r}
+library(sva)
+batch <- factor(c(rep(gse1, ncol(expression1_common)), 
+                  rep(gse2, ncol(expression2_common)), 
+                  rep(gse3, ncol(expression3_common)),
+                  rep(gse4, ncol(expression4_common)),
+                  rep(gse4, ncol(expression5_common))))
+mod <- model.matrix(~1, data=data.frame(ones=rep(1, 2768)))
+combat_eMat <- sva::ComBat(dat=eMat, batch=batch, mod=mod, par.prior=TRUE, prior.plots=FALSE)
+dim(combat_eMat)
+```
+# PCA check result from batch effect
+```{r}
+gse_pca <- prcomp(t(combat_eMat))
+df_toplot <- data.frame(group,
+                        pc1 = gse_pca$x[,1], pc2 = gse_pca$x[,2],
+                        batch = batch_info)
+df_toplot$batch <- as.factor(df_toplot$batch)
+ggplot(df_toplot, aes(x = pc1, y = pc2, color = group)) + 
+  geom_point(size = 1.5) + labs(colour = "Outcome") +
+  theme_minimal()
+ggplot(df_toplot, aes(x = pc1, y = pc2, color = batch)) + 
+  geom_point(size = 1.5) + labs(colour = "Batch") +
+  theme_minimal()
+```
+#set general group
+```{r}
+phen1 <- pheno1[rownames(pheno1) %in% colnames(expression1_common),]
+phen2 <- pheno2[rownames(pheno2) %in% colnames(expression2_common),]
+phen3 <- pheno3[rownames(pheno3) %in% colnames(expression3_common),]
+phen4 <- pheno4[rownames(pheno4) %in% colnames(expression4_common),]
+phen5 <- pheno5[rownames(pheno5) %in% colnames(expression5_common),]
+group <- c(phen1$Outcome,phen2$Outcome,phen3$Outcome,phen4$Outcome,phen5$Outcome)
+length(group)
+```
+# adjust expression
+```{r}
+exprSet_corrected <- combat_eMat[, colnames(combat_eMat) %in% c(rownames(phen1), rownames(phen2),rownames(phen3),rownames(phen4),rownames(phen5))]
+dim(exprSet_corrected)
+```
+#limma selection
+```{r}
+group_factor <- factor(group)
+design <- model.matrix(~ 0 + group_factor)
+colnames(design) <- levels(group_factor)
+rownames(design) <- colnames(exprSet_corrected)
+contrasts_matrix <- makeContrasts(
+  Stable_vs_ABMR = Stable - ABMR,
+  Stable_vs_TCMR =Stable - TCMR,
+  ABRM_vs_TCMR = Stable - ((ABMR+TCMR)*(1/2)),
+  levels = design
+)
+fit <- lmFit(exprSet_corrected, design)
+fit <- contrasts.fit(fit, contrasts = contrasts_matrix)
+fit <- eBayes(fit)
+tT <-topTable(fit,number=Inf,adjust ='BH')%>% arrange('adj.P.Val')
+top100 <- rownames(tT[1:100,])
+top100
+```
+#then lasso selection
+```{r}
+set.seed(3888)
+genes <- exprSet_corrected[top100,]
+group_numeric <- as.numeric(factor(group))
+x<- t(genes)
+cv_lasso <- cv.glmnet(x, group_numeric, alpha = 1)
+opt_lambda <- cv_lasso$lambda.1se
+final_lasso <- glmnet(x, group_numeric, alpha = 1, lambda = opt_lambda)
+lasso_coef <- coef(final_lasso, s = opt_lambda)
+selected_genes <- rownames(genes)[which(lasso_coef[-1,] != 0)]
+selected_genes #38
+```
+# heatmap
+```{r}
+normalized_expression <- scale(exprSet_corrected[selected_genes, ])
+pheatmap(normalized_expression, 
+         scale = "row",
+         clustering_distance_rows = "euclidean",
+         clustering_distance_cols = "euclidean",
+         clustering_method = "complete", 
+         main = 'Heatmap of Selected Genes',
+         fontsize = 5
+)
+```
+
+```{r}
+set.seed(3888)
+
+X = t(exprSet_corrected)
+y = factor(group)
+
+cvK = 5
+n_sim = 20
+
+cv_accuracy_rf = cv_accuracy_svm = cv_accuracy_knn = numeric(n_sim)
+
+for (i in 1:n_sim) {
+  cvSets = cvFolds(nrow(X), cvK) 
+  cv_accuracy_folds_rf = cv_accuracy_folds_svm = cv_accuracy_folds_knn = numeric(cvK)
+
+  for (j in 1:cvK) {
+    test_id = cvSets$subsets[cvSets$which == j]
+    X_train = X[-test_id,]
+    X_test = X[test_id,]
+    y_train = y[-test_id]
+    y_test = y[test_id]
+    
+    design <- model.matrix(~ 0 + y_train)
+    colnames(design) <- levels(y_train)
+    contrasts_matrix <- makeContrasts(
+      Stable_vs_ABMR = Stable - ABMR,
+      Stable_vs_TCMR =Stable - TCMR,
+      ABRM_vs_TCMR = Stable - ((ABMR+TCMR)*(1/2)),
+      levels = design
+    )
+    
+    fit <- lmFit(t(X_train), design)
+    fit <- contrasts.fit(fit, contrasts = contrasts_matrix)
+    fit <- eBayes(fit)
+    tT <- topTable(fit, number = 50) %>% arrange('adj.P.Val')
+    
+    X_train <- X_train[, rownames(tT)]
+    X_test <- X_test[, rownames(tT)]
+    
+    group_numeric <- as.numeric(y_train)
+    cv_lasso <- cv.glmnet(X_train, group_numeric, alpha = 1)
+    opt_lambda <- cv_lasso$lambda.1se
+    final_lasso <- glmnet(X_train, group_numeric, alpha = 1, lambda = opt_lambda)
+    lasso_coef <- coef(final_lasso, s = opt_lambda)
+    lasso_genes <- colnames(X_train)[which(lasso_coef[-1,] != 0)]
+
+    X_train = X_train[,lasso_genes]
+    X_test = X_test[,lasso_genes]
+    
+    rf_fit = randomForest(x = X_train, y = y_train)
+    predictions_rf = predict(rf_fit, X_test)
+    cv_accuracy_folds_rf[j] = mean(y_test == predictions_rf)
+    
+    knn_fit = class::knn(train = X_train, test = X_test, cl = y_train, k = 5)
+    cv_accuracy_folds_knn[j] = mean(y_test == knn_fit)
+
+    svm_fit = svm(X_train, y_train)
+    predictions_svm = predict(svm_fit, X_test)
+    cv_accuracy_folds_svm[j] = mean(y_test == predictions_svm)
+  }
+  
+  cv_accuracy_rf[i] = mean(cv_accuracy_folds_rf)
+  cv_accuracy_knn[i] = mean(cv_accuracy_folds_knn)
+  cv_accuracy_svm[i] = mean(cv_accuracy_folds_svm)
+}
+
+boxplot(cv_accuracy_rf, cv_accuracy_knn, cv_accuracy_svm, names = c("RF", "KNN (k = 5)", "SVM"),
+        xlab = "Classifier", ylab = "Accuracy", main = "Performance of classifiers on top DE genes using Limma-Lasso")
+```
+
